@@ -1,7 +1,8 @@
-"""Provider boundary tests: no real network requests or model spending."""
+"""Provider boundary tests for the OpenRouter transport: no real network requests or model spending."""
 
 import copy
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -33,25 +34,27 @@ def choice(selected, options):
 
 
 def jev_response():
-    return {"success": True, "result": {"state": "Completed", "result": {
-        "model": "jev-1.13.0", "usage": {"input_tokens": 250, "output_tokens": 50},
-        "answers": {"action": choice("option_001", ["option_000", "option_001"]),
-                    "think": choice("yes", ["yes", "no"]), "speak": choice("no", ["yes", "no"])},
-    }}}
+    # Shape returned by OpenRouter's POST /api/alpha/decisions for typesafe/jev-1.14.
+    return {"model": "typesafe/jev-1.14-20261014", "provider": "TypeSafe", "id": "gen-dec-test",
+            "usage": {"input_tokens": 250, "output_tokens": 50, "cost": 0.0000105},
+            "answers": {"action": choice("option_001", ["option_000", "option_001"]),
+                        "think": choice("yes", ["yes", "no"]), "speak": choice("no", ["yes", "no"])}}
 
 
-def luna_response(value, *, status="completed"):
-    return {"status": status, "usage": {"input_tokens": 90, "output_tokens": 20},
-            "output": [{"type": "reasoning", "summary": []},
-                       {"type": "message", "content": [{"type": "output_text", "text": json.dumps(value)}]}]}
+def luna_response(value, *, finish_reason="stop"):
+    # Shape returned by OpenRouter's POST /api/v1/chat/completions.
+    return {"model": "openai/gpt-6-luna", "provider": "OpenAI",
+            "usage": {"prompt_tokens": 90, "completion_tokens": 20, "cost": 0.000019},
+            "choices": [{"finish_reason": finish_reason,
+                         "message": {"role": "assistant", "content": json.dumps(value), "refusal": None}}]}
 
 
 class ProviderTests(unittest.TestCase):
     def setUp(self):
-        self.environment = patch.dict("os.environ", {"CLOUDFLARE_ACCOUNT_ID": "test-account",
-                                                   "CLOUDFLARE_API_TOKEN": "secret-cf-token",
-                                                   "OPENAI_API_KEY": "secret-openai-token"})
+        self.environment = patch.dict("os.environ", {"OPENROUTER_API_KEY": "secret-openrouter-token"})
         self.environment.start()
+        for name in ("VILLAGE_JEV_MODEL", "VILLAGE_LUNA_MODEL"):
+            os.environ.pop(name, None)  # Restored by patch.dict on stop.
         self.requests = []
         self.clients = []
 
@@ -77,13 +80,15 @@ class ProviderTests(unittest.TestCase):
         self.assertFalse(decision["speak"])
         self.assertEqual(decision["source"], "jev")
         payload = json.loads(self.requests[0].content)
-        self.assertEqual(self.requests[0].url.path, "/client/v4/accounts/test-account/ai/run")
-        self.assertEqual(payload["model"], "typesafe/jev")
-        self.assertEqual(len(payload["input"]["questions"]["action"]["criteria"]), 2)
+        self.assertEqual(str(self.requests[0].url), "https://openrouter.ai/api/alpha/decisions")
+        self.assertEqual(self.requests[0].headers["authorization"], "Bearer secret-openrouter-token")
+        self.assertEqual(payload["model"], "typesafe/jev-1.14")
+        self.assertEqual(len(payload["questions"]["action"]["criteria"]), 2)
         self.assertNotIn("remote_person", json.dumps(payload))
         self.assertAlmostEqual(sum(decision["probabilities"].values()), 1)
         self.assertEqual(gateway.metrics["jev"]["calls"], 1)
         self.assertEqual(gateway.metrics["total_tokens"], 300)
+        self.assertAlmostEqual(gateway.metrics["jev"]["cost_usd"], 0.0000105)
 
     def test_choice_budget_keeps_all_actions_and_nearest_targets(self):
         context = copy.deepcopy(CONTEXT)
@@ -106,7 +111,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_invalid_model_choice_never_becomes_demo(self):
         body = jev_response()
-        body["result"]["result"]["answers"]["action"]["choice"] = "invented_action"
+        body["answers"]["action"]["choice"] = "invented_action"
         gateway = self.gateway(body)
         with self.assertRaisesRegex(ProviderError, "invalid action choice"):
             gateway.decide(CONTEXT, ACTIONS)
@@ -115,23 +120,23 @@ class ProviderTests(unittest.TestCase):
 
     def test_nan_probabilities_are_rejected(self):
         body = jev_response()
-        body["result"]["result"]["answers"]["action"]["probabilities"]["option_000"] = -1
+        body["answers"]["action"]["probabilities"]["option_000"] = -1
         with self.assertRaisesRegex(ProviderError, "probabilities"):
             self.gateway(body).decide(CONTEXT, ACTIONS)
 
     def test_errors_and_status_do_not_expose_upstream_secrets(self):
-        gateway = self.gateway({"error": "secret-cf-token secret-openai-token sensitive upstream body"}, status=403)
+        gateway = self.gateway({"error": "secret-openrouter-token sensitive upstream body"}, status=403)
         with self.assertRaises(ProviderError) as caught:
             gateway.decide(CONTEXT, ACTIONS)
         rendered = str(caught.exception) + json.dumps(gateway.status())
         self.assertNotIn("secret-", rendered)
         self.assertNotIn("sensitive upstream", rendered)
         self.assertEqual(len(self.requests), 1)
-        self.assertEqual(gateway.status()["luna"]["model"], "gpt-6-luna")
+        self.assertEqual(gateway.status()["luna"]["model"], "openai/gpt-6-luna")
 
     def test_timeout_is_not_retried(self):
         def fail(request):
-            raise httpx.ReadTimeout("secret-cf-token", request=request)
+            raise httpx.ReadTimeout("secret-openrouter-token", request=request)
         gateway = self.gateway(handler=fail)
         with self.assertRaisesRegex(ProviderError, "timed out"):
             gateway.decide(CONTEXT, ACTIONS)
@@ -139,7 +144,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_connection_failures_have_only_one_bounded_retry(self):
         def fail(request):
-            raise httpx.ConnectError("secret-cf-token", request=request)
+            raise httpx.ConnectError("secret-openrouter-token", request=request)
         gateway = self.gateway(handler=fail)
         with patch("village.providers.time.sleep") as sleep:
             with self.assertRaisesRegex(ProviderError, "connection unavailable"):
@@ -151,11 +156,12 @@ class ProviderTests(unittest.TestCase):
         gateway = self.gateway(luna_response({"thought": "I hope Ben has heard the news.", "speech": "Not permitted by gate"}))
         narrative = gateway.narrate(CONTEXT, {"action": "talk", "target_id": "ben", "think": True, "speak": False})
         payload = json.loads(self.requests[0].content)
+        self.assertEqual(str(self.requests[0].url), "https://openrouter.ai/api/v1/chat/completions")
         self.assertEqual(payload["model"], LUNA_MODEL)
         self.assertEqual(payload["reasoning"], {"effort": "low"})
-        self.assertTrue(payload["text"]["format"]["strict"])
-        self.assertLessEqual(payload["max_output_tokens"], 1000)
-        self.assertFalse(payload["store"])
+        self.assertTrue(payload["response_format"]["json_schema"]["strict"])
+        self.assertTrue(payload["provider"]["require_parameters"])
+        self.assertLessEqual(payload["max_tokens"], 1000)
         self.assertEqual(narrative["speech"], "")
         self.assertEqual(narrative["source"], "luna")
 
@@ -167,7 +173,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
     def test_incomplete_luna_response_never_applies_narrative(self):
-        gateway = self.gateway(luna_response({"thought": "Partial thought", "speech": ""}, status="incomplete"))
+        gateway = self.gateway(luna_response({"thought": "Partial thought", "speech": ""}, finish_reason="length"))
         with self.assertRaisesRegex(ProviderError, "incomplete"):
             gateway.narrate(CONTEXT, {"think": True})
         self.assertEqual(gateway.metrics["luna"]["output_tokens"], 20)
@@ -237,7 +243,7 @@ class ProviderTests(unittest.TestCase):
         context["actor"]["memories"] = [{"text": retired["text"], "context_id": "monster-0", "resolved": True,
                                          "context_status": "dismissed", "resolution": retired["resolution"]}]
         self.gateway(jev_response()).decide(context, ACTIONS)
-        payload = json.loads(self.requests[0].content)["input"]
+        payload = json.loads(self.requests[0].content)
         self.assertEqual(payload["state"]["contexts"], [])
         self.assertEqual(len(payload["state"]["scenario_history"]), 6)
         self.assertNotIn("internal_debug", payload["state"]["scenario_history"][0])
@@ -255,9 +261,11 @@ class ProviderTests(unittest.TestCase):
         narrative = self.gateway(luna_response({"thought": "The gentler rain is a relief.", "speech": ""})).narrate(
             context, {"think": True, "speak": False})
         payload = json.loads(self.requests[0].content)
-        model_context = json.loads(payload["input"])["context"]
-        self.assertIn("Active contexts are authoritative", payload["instructions"])
-        self.assertIn("supersedes its old version", payload["instructions"])
+        system, user = payload["messages"]
+        model_context = json.loads(user["content"])["context"]
+        self.assertEqual((system["role"], user["role"]), ("system", "user"))
+        self.assertIn("Active contexts are authoritative", system["content"])
+        self.assertIn("supersedes its old version", system["content"])
         self.assertEqual(model_context["scenario_history"][0]["replaced_by"], "new-weather")
         self.assertEqual(narrative["context_ids"], ["new-weather"])
 
@@ -285,13 +293,36 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn("is approaching", narrative["thought"])
 
     def test_missing_keys_are_explicit_failures(self):
-        with patch.dict("os.environ", {"CLOUDFLARE_API_TOKEN": "", "OPENAI_API_KEY": ""}):
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": ""}):
             gateway = self.gateway({})
-        with self.assertRaisesRegex(ProviderError, "CLOUDFLARE"):
+        with self.assertRaisesRegex(ProviderError, "OPENROUTER_API_KEY"):
             gateway.decide(CONTEXT, ACTIONS)
-        with self.assertRaisesRegex(ProviderError, "OPENAI_API_KEY"):
+        with self.assertRaisesRegex(ProviderError, "OPENROUTER_API_KEY"):
             gateway.narrate(CONTEXT, {"think": True})
         self.assertEqual(len(self.requests), 0)
+        self.assertFalse(gateway.status()["jev"]["configured"])
+
+    def test_model_ids_can_be_overridden_from_env(self):
+        with patch.dict("os.environ", {"VILLAGE_JEV_MODEL": "typesafe/jev-1.13",
+                                       "VILLAGE_LUNA_MODEL": "openai/gpt-6-luna-pro"}):
+            gateway = self.gateway(jev_response())
+        gateway.decide(CONTEXT, ACTIONS)
+        self.assertEqual(json.loads(self.requests[0].content)["model"], "typesafe/jev-1.13")
+        self.assertEqual(gateway.status()["luna"]["model"], "openai/gpt-6-luna-pro")
+
+    def test_luna_usage_and_cost_are_recorded(self):
+        gateway = self.gateway(luna_response({"thought": "Rain again.", "speech": ""}))
+        gateway.narrate(CONTEXT, {"think": True, "speak": False})
+        self.assertEqual((gateway.metrics["luna"]["input_tokens"], gateway.metrics["luna"]["output_tokens"]), (90, 20))
+        self.assertAlmostEqual(gateway.status()["luna"]["cost_usd"], 0.000019)
+
+    def test_exhausted_credits_are_explained(self):
+        with self.assertRaisesRegex(ProviderError, "credits are exhausted"):
+            self.gateway({"error": {"code": 402}}, status=402).decide(CONTEXT, ACTIONS)
+
+    def test_error_body_with_success_status_is_rejected(self):
+        with self.assertRaisesRegex(ProviderError, "unsuccessful"):
+            self.gateway({"error": {"message": "upstream failed"}}).narrate(CONTEXT, {"think": True})
 
 
 if __name__ == "__main__":

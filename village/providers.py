@@ -1,8 +1,10 @@
 """Server-side Jev decisions and Luna prose. Demo behavior is always explicit.
 
-Jev transport follows the Cloudflare typesafe/jev model card.
-Luna uses the Responses API with strict structured outputs, low reasoning, and
-no tools. The displayed inner monologue is fictional character writing.
+Both models are called through OpenRouter with one OPENROUTER_API_KEY. Jev
+answers typed choice questions through OpenRouter's Decisions endpoint and
+returns a probability for every option. Luna uses chat completions with strict
+structured outputs, low reasoning, and no tools. The displayed inner monologue
+is fictional character writing.
 """
 
 from __future__ import annotations
@@ -22,10 +24,10 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
-JEV_MODEL = "typesafe/jev"
-LUNA_MODEL = "gpt-6-luna"
-JEV_URL = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run"
-LUNA_URL = "https://api.openai.com/v1/responses"
+JEV_MODEL = "typesafe/jev-1.14"
+LUNA_MODEL = "openai/gpt-6-luna"
+JEV_URL = "https://openrouter.ai/api/alpha/decisions"
+LUNA_URL = "https://openrouter.ai/api/v1/chat/completions"
 ORACLE_KINDS = ("atmosphere", "threat", "abundance", "scarcity", "celebration", "politics", "weather")
 WEATHER = ("clear", "sunny", "cloudy", "rain", "storm", "fog", "snow")
 SCENARIO_LIFECYCLE = (
@@ -66,9 +68,9 @@ class ModelGateway:
         if load_env:
             load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
             load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
-        self._account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
-        self._cloudflare_key = os.environ.get("CLOUDFLARE_API_TOKEN", "")
-        self._openai_key = os.environ.get("OPENAI_API_KEY", "")
+        self._openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+        self._jev_model = os.environ.get("VILLAGE_JEV_MODEL") or JEV_MODEL
+        self._luna_model = os.environ.get("VILLAGE_LUNA_MODEL") or LUNA_MODEL
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(20.0, connect=4.0, write=5.0, pool=2.0),
@@ -77,7 +79,7 @@ class ModelGateway:
         )
         self._lock = threading.RLock()
         self._metrics = {name: {"calls": 0, "successes": 0, "errors": 0,
-                               "input_tokens": 0, "output_tokens": 0,
+                               "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
                                "last_latency_ms": 0.0, "total_latency_ms": 0.0}
                          for name in ("jev", "luna")}
         self._last_error: dict[str, str | None] = {"jev": None, "luna": None}
@@ -94,11 +96,11 @@ class ModelGateway:
     def status(self) -> dict:
         with self._lock:
             return {
-                "jev": {"configured": bool(self._account_id and self._cloudflare_key), "model": JEV_MODEL,
-                        "provider": "Cloudflare Workers AI", "last_error": self._last_error["jev"],
+                "jev": {"configured": bool(self._openrouter_key), "model": self._jev_model,
+                        "provider": "OpenRouter", "last_error": self._last_error["jev"],
                         **copy.deepcopy(self._metrics["jev"])},
-                "luna": {"configured": bool(self._openai_key), "model": LUNA_MODEL,
-                         "provider": "OpenAI", "reasoning": "low", "last_error": self._last_error["luna"],
+                "luna": {"configured": bool(self._openrouter_key), "model": self._luna_model,
+                         "provider": "OpenRouter", "reasoning": "low", "last_error": self._last_error["luna"],
                          **copy.deepcopy(self._metrics["luna"])},
             }
 
@@ -134,6 +136,8 @@ class ModelGateway:
                     raise self._error(provider, "request failed; check network access") from None
             if response.status_code in (401, 403):
                 raise self._error(provider, "credentials were rejected; check API access and model permissions")
+            if response.status_code == 402:
+                raise self._error(provider, "OpenRouter credits are exhausted; add credits or use demo mode")
             if response.status_code == 429:
                 raise self._error(provider, "rate or spending limit reached; retry later")
             if not 200 <= response.status_code < 300:
@@ -144,7 +148,7 @@ class ModelGateway:
                 body = response.json()
             except (ValueError, UnicodeError):
                 raise self._error(provider, "response was not valid JSON") from None
-            if not isinstance(body, dict) or body.get("success") is False:
+            if not isinstance(body, dict) or body.get("success") is False or "error" in body:
                 raise self._error(provider, "upstream reported an unsuccessful response")
             return body
         finally:
@@ -157,11 +161,16 @@ class ModelGateway:
         usage = body.get("usage", {})
         if not isinstance(usage, dict):
             return
+        # Decisions report input/output tokens; chat completions report prompt/completion tokens.
+        counts = {"input_tokens": usage.get("input_tokens", usage.get("prompt_tokens", 0)),
+                  "output_tokens": usage.get("output_tokens", usage.get("completion_tokens", 0))}
         with self._lock:
-            for name in ("input_tokens", "output_tokens"):
-                value = usage.get(name, 0)
+            for name, value in counts.items():
                 if _finite(value, 0, 10_000_000):
                     self._metrics[provider][name] += int(value)
+            cost = usage.get("cost")
+            if _finite(cost, 0, 1_000):  # OpenRouter's billed cost for this call, in USD.
+                self._metrics[provider]["cost_usd"] = round(self._metrics[provider]["cost_usd"] + cost, 8)
 
     def _success(self, provider: str) -> None:
         with self._lock:
@@ -239,11 +248,11 @@ class ModelGateway:
         return answer["choice"], {k: v / total for k, v in probabilities.items()}, float(confidence)
 
     def decide(self, context: dict, actions: list[dict]) -> dict:
-        if not self._account_id or not self._cloudflare_key:
-            raise self._error("jev", "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required for live mode")
+        if not self._openrouter_key:
+            raise self._error("jev", "OPENROUTER_API_KEY is required for live mode")
         criteria, pairs = self._candidates(context, actions)
         binary = {"yes": "Yes", "no": "No"}
-        payload = {"model": JEV_MODEL, "input": {"state": self._context(context), "questions": {
+        payload = {"model": self._jev_model, "state": self._context(context), "questions": {
             "action": {"type": "choice", "criteria": criteria, "instructions":
                 "Choose the next most plausible action and partner for this fictional village resident. "
                 "All actor.needs scores measure fulfillment from 0 (depleted) to 100 (satisfied): "
@@ -272,15 +281,11 @@ class ModelGateway:
                 "Would this person plausibly say a short line aloud now, given nearby people and events? "
                 "Choose no for quiet routine, rest, or solitary activity without a reason to speak. "
                 "Respect state.scenario_lifecycle; historical threats are not current warnings."},
-        }}}
+        }}
         if len(json.dumps(payload, ensure_ascii=False)) > 90_000:
             raise self._error("jev", "decision context exceeds the input budget")
-        body = self._post("jev", JEV_URL.format(account_id=self._account_id), self._cloudflare_key, payload)
-        for _ in range(4):
-            if isinstance(body, dict) and "answers" in body:
-                break
-            body = body.get("result") if isinstance(body, dict) else None
-        if not isinstance(body, dict) or not isinstance(body.get("answers"), dict):
+        body = self._post("jev", JEV_URL, self._openrouter_key, payload)
+        if not isinstance(body.get("answers"), dict):
             raise self._error("jev", "response did not contain completed structured answers")
         self._record_usage("jev", body)
         option, probabilities, confidence = self._choice(body["answers"], "action", criteria)
@@ -296,36 +301,32 @@ class ModelGateway:
                 "confidence": confidence, "probabilities": action_probabilities, "source": "jev"}
 
     def _luna(self, instructions: str, data: dict, schema: dict, name: str) -> dict:
-        if not self._openai_key:
-            raise self._error("luna", "OPENAI_API_KEY is required for live dialogue and oracle interpretation")
-        payload = {"model": LUNA_MODEL, "reasoning": {"effort": "low"}, "max_output_tokens": 900,
-                   "store": False, "instructions": instructions,
-                   "input": json.dumps(data, ensure_ascii=False),
-                   "text": {"format": {"type": "json_schema", "name": name, "strict": True, "schema": schema}}}
-        if len(payload["input"]) > 60_000:
+        if not self._openrouter_key:
+            raise self._error("luna", "OPENROUTER_API_KEY is required for live dialogue and oracle interpretation")
+        user_input = json.dumps(data, ensure_ascii=False)
+        if len(user_input) > 60_000:
             raise self._error("luna", "narrative context exceeds the input budget")
-        body = self._post("luna", LUNA_URL, self._openai_key, payload)
+        payload = {"model": self._luna_model, "reasoning": {"effort": "low"}, "max_tokens": 900,
+                   "messages": [{"role": "system", "content": instructions}, {"role": "user", "content": user_input}],
+                   "response_format": {"type": "json_schema",
+                                       "json_schema": {"name": name, "strict": True, "schema": schema}},
+                   # Route only to providers that honour the strict schema and reasoning setting.
+                   "provider": {"require_parameters": True}}
+        body = self._post("luna", LUNA_URL, self._openrouter_key, payload)
         self._record_usage("luna", body)
-        if body.get("status") != "completed":
-            raise self._error("luna", "response was incomplete; no narrative was applied")
-        parts = []
-        outputs = body.get("output", [])
-        if not isinstance(outputs, list):
+        choices = body.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
             raise self._error("luna", "response output failed validation")
-        for output in outputs:
-            if not isinstance(output, dict) or output.get("type") != "message":
-                continue
-            contents = output.get("content", [])
-            if not isinstance(contents, list):
-                raise self._error("luna", "response content failed validation")
-            for content in contents:
-                if isinstance(content, dict) and content.get("type") == "refusal":
-                    raise self._error("luna", "the model declined this narrative request")
-                if isinstance(content, dict) and content.get("type") == "output_text" and isinstance(content.get("text"), str):
-                    parts.append(content["text"])
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise self._error("luna", "response content failed validation")
+        if message.get("refusal") or choices[0].get("finish_reason") == "content_filter":
+            raise self._error("luna", "the model declined this narrative request")
+        if choices[0].get("finish_reason") != "stop":
+            raise self._error("luna", "response was incomplete; no narrative was applied")
         try:
-            result = json.loads("".join(parts))
-        except (ValueError, UnicodeError):
+            result = json.loads(message.get("content") or "")
+        except (ValueError, UnicodeError, TypeError):
             raise self._error("luna", "response did not contain valid structured text") from None
         if not isinstance(result, dict):
             raise self._error("luna", "structured text was not an object")

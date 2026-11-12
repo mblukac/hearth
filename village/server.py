@@ -125,7 +125,7 @@ class VillageApp:
                 if body["mode"] not in ("demo", "live"):
                     raise RequestError("Choose demo or live mode.")
                 if body["mode"] == "live" and not self.live_ready():
-                    raise RequestError("Live mode needs Cloudflare and OpenAI credentials in the project .env.")
+                    raise RequestError("Live mode needs OPENROUTER_API_KEY in the .env file.")
             if "speed" in body and (type(body["speed"]) is not int or body["speed"] not in (1, 2, 5, 10)):
                 raise RequestError("Speed must be 1, 2, 5, or 10.")
             for key in ("running", "step"):

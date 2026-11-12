@@ -14,7 +14,7 @@ From the repository root (setup is in the top-level README):
 
 Open **http://127.0.0.1:8765**. The village starts paused. Press Play to run it. It restores its previous saved state automatically.
 
-A `.env` file in the repository root (copied from `village/.env.example`) supplies `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `OPENAI_API_KEY`. Credentials stay in Python and never enter the browser. No Cloudflare deployment is required: the local server calls Jev through Cloudflare Workers AI. Missing credentials select the labelled demo mode.
+A `.env` file in the repository root (copied from `village/.env.example`) supplies `OPENROUTER_API_KEY`. The local server calls both models through OpenRouter with that one key; the key stays in Python and never enters the browser. Without it, Hearth starts in the labelled demo mode.
 
 ```sh
 # Explicit offline demo; no external model requests
@@ -43,20 +43,23 @@ For another Python environment, install `village/requirements.txt`. Python 3.11+
 
 1. Python advances the clock, needs, movement, and queued interactions independently of network inference.
 2. Each available villager receives their own persona, memories, relationships, nearby public observations, and active world contexts.
-3. Jev chooses a valid action/target pair and separately decides whether thought or speech is warranted. The UI exposes action probabilities and source. The engine rechecks eligibility before changing the world.
-4. Only when selected, `gpt-6-luna` with **low reasoning** produces short structured character dialogue. The character's displayed thoughts are authored fiction, not the model's private reasoning.
+3. Jev (`typesafe/jev-1.14` through OpenRouter's Decisions endpoint) chooses a valid action/target pair and separately decides whether thought or speech is warranted. It returns a probability for every option; the UI shows them with their source. The engine rechecks eligibility before changing the world.
+4. Only when selected, Luna (`openai/gpt-6-luna` through OpenRouter chat completions) with **low reasoning** produces short structured character dialogue. Requests go only to providers that honour the strict JSON schema. The character's displayed thoughts are authored fiction, not the model's private reasoning.
 5. Luna also interprets oracle prompts into bounded changes to the world. The original event text remains available to every villager.
 
 Jev's action instructions use a flexible Maslow-inspired priority. All need scores measure fulfillment: `hunger` is nourishment, so zero means unfed and a high value means well fed. Critical bodily needs and immediate danger generally take priority, followed by ordinary work, meals, rest, and a varied social life. These are prompt-level preferences, allowing caregiving and individual differences; they do not impose a rigid hierarchy or force particular actions.
 
 Live mode does not silently replace failed calls with scripted output. Errors appear in the interface; repeated failures pause the scheduler. Demo mode uses seeded local decisions and scripted prose, with its source labelled explicitly.
 
-The default rate limits are **60 Jev decisions and 12 Luna calls per wall-clock minute**, shared with oracle interpretation for Luna. Autonomous dialogue leaves two Luna slots available for creating or editing scenarios. There are at most four background model jobs. Increasing game speed does not increase these call ceilings. Calls and token usage are displayed; monetary cost is not estimated because it depends on provider pricing. A 3,000-call server-session ceiling pauses autonomous inference. Calls already in flight may finish after Pause or a scenario change, but stale results are discarded. Save/export can happen while the village runs. Scenario changes save immediately.
+The default rate limits are **60 Jev decisions and 12 Luna calls per wall-clock minute**, shared with oracle interpretation for Luna. Autonomous dialogue leaves two Luna slots available for creating or editing scenarios. There are at most four background model jobs. Increasing game speed does not increase these call ceilings. Calls, token usage and the cost OpenRouter reports for each call are shown under **Model details**; Hearth adds up those reported costs and estimates nothing itself. A 3,000-call server-session ceiling pauses autonomous inference. Calls already in flight may finish after Pause or a scenario change, but stale results are discarded. Save/export can happen while the village runs. Scenario changes save immediately.
 
 Environment settings, read when the server starts:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `OPENROUTER_API_KEY` | none | Required for live mode |
+| `VILLAGE_JEV_MODEL` | `typesafe/jev-1.14` | OpenRouter Decisions model |
+| `VILLAGE_LUNA_MODEL` | `openai/gpt-6-luna` | OpenRouter chat model for thoughts, speech and scenarios |
 | `VILLAGE_JEV_RPM` | `60` | Maximum scheduled Jev decisions per minute |
 | `VILLAGE_LUNA_RPM` | `12` | Maximum narrative/oracle calls per minute |
 | `VILLAGE_SESSION_CALL_LIMIT` | `3000` | Total scheduled model calls per process |
@@ -88,7 +91,7 @@ Run checks from the project directory:
 
 - [Introducing System One Models & Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
 - [TypeSafe primitives and structured decisions](https://docs.typesafe.ai/introduction)
-- [Cloudflare's Jev API and model card](https://developers.cloudflare.com/ai/models/typesafe/jev/)
-- [OpenAI Responses reasoning configuration](https://developers.openai.com/api/docs/guides/reasoning)
+- [Jev 1.14 on OpenRouter](https://openrouter.ai/typesafe/jev-1.14)
+- [OpenRouter Decisions API (alpha)](https://openrouter.ai/docs/client-sdks/python/sdks/decisions/README.md)
 
-Jev transport follows an integration verified earlier in a separate research project; Hearth does not depend on that code.
+OpenRouter marks the Decisions endpoint as alpha, so its request shape may change.
