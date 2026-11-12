@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#203e32">
+  <meta name="description" content="Hearth is a living village: twenty lives, a shared world, and the consequences of every small decision.">
+  <title>Hearth — a living village</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="Hearth home"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M4 17 16 5l12 12v11H4Z" fill="currentColor"/><path d="M12 28v-9h8v9" fill="#f6f3e9"/><path d="M14 3h4v6h-4z" fill="currentColor"/></svg></span><span>hearth<span class="brand-dot">.</span></span></a>
+    <div class="brand-description">LITTLE LIVES.<br>BIG CONSEQUENCES.</div>
+    <nav class="header-actions" aria-label="Village tools">
+      <span class="connection" id="connection"><span class="status-dot"></span><span>Connecting</span></span>
+      <button class="quiet-button" id="save-button" title="Save the village">Save village</button>
+      <a class="quiet-button export-link" href="/api/export" download="hearth-village.json">Export</a>
+      <button class="icon-button" id="help-button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts">?</button>
+    </nav>
+  </header>
+
+  <main>
+    <section class="village-heading" aria-label="Village overview">
+      <div><div class="eyebrow">A WORLD OF ITS OWN</div><h1>Life in the clearing<span class="title-star">✳</span></h1><p>Twenty lives. A place to belong. The rest is unwritten.</p></div>
+      <div class="world-stats" id="world-stats"><div class="world-stat"><span>POPULATION</span><strong>20 <small>souls</small></strong></div><div class="world-stat"><span>PROSPERITY</span><strong>—</strong></div><div class="world-stat"><span>SOCIAL TENSION</span><strong>—</strong></div></div>
+    </section>
+
+    <div class="workspace">
+      <section class="map-panel" aria-label="Live village map">
+        <div class="map-toolbar">
+          <div class="map-title"><span class="live-square"></span><strong>THE VILLAGE</strong><span class="map-day" id="clock-label">Day 1 · 08:00</span></div>
+          <div class="simulation-controls">
+            <button class="play-button" id="play-button" aria-label="Start simulation" title="Play / pause (Space)"><span class="play-icon">▶</span><span class="play-label">Begin life</span></button>
+            <button class="step-button" id="step-button" title="Advance one turn (.)" aria-label="Advance one turn">▸|</button>
+            <select id="speed-select" aria-label="Simulation speed"><option value="1">1×</option><option value="2">2×</option><option value="5">5×</option><option value="10">10×</option></select>
+          </div>
+        </div>
+        <div class="canvas-wrap" id="canvas-wrap">
+          <canvas id="village-canvas" tabindex="0" aria-label="Interactive village. Drag to explore, scroll to zoom, or click a villager to inspect them. Use the People button for an accessible roster."></canvas>
+          <div class="map-corner top-left"><span class="map-weather" id="weather-label">☀ CLEAR SKIES</span><span class="map-context" id="map-context" hidden></span></div>
+          <div class="map-corner top-right"><span class="model-badge" id="mode-badge">CONNECTING</span></div>
+          <div class="map-hint" id="map-hint">A whole world is waiting. Press play to begin.</div>
+          <div class="map-corner bottom-left"><button class="map-button" id="people-button">♙ People <span id="people-count">20</span></button><button class="map-button" id="labels-button" aria-pressed="true" title="Show / hide names (N)">Names</button></div>
+          <div class="map-corner bottom-right"><button class="map-button square" id="zoom-out" aria-label="Zoom out">−</button><button class="map-button zoom-fit" id="zoom-fit" title="Fit village (0)">Fit</button><button class="map-button square" id="zoom-in" aria-label="Zoom in">+</button></div>
+          <div class="people-popover" id="people-popover" hidden><div class="popover-heading"><strong>Everyone in Hearth</strong><button class="icon-button" id="close-people" aria-label="Close people">×</button></div><input id="people-search" type="search" placeholder="Find a villager…" aria-label="Search villagers"><div class="people-list" id="people-list"></div></div>
+          <div class="map-tooltip" id="map-tooltip" hidden></div>
+        </div>
+        <div class="map-footer"><span><span class="footer-dot"></span><span id="simulation-state">Connecting to world</span></span><span class="map-instructions">DRAG TO EXPLORE <span>·</span> SCROLL TO ZOOM <span>·</span> CLICK A SOUL</span><button class="text-button" id="reset-button">New world ↗</button></div>
+      </section>
+
+      <aside class="inspector panel" aria-label="Selected villager">
+        <div class="section-heading"><span class="eyebrow">ONE OF MANY STORIES</span><button class="text-button" id="random-person" title="Meet another villager">Meet someone ↗</button></div>
+        <div id="person-header" class="person-header"><div class="portrait placeholder-portrait">♙</div><h2>Meet your villagers</h2><p>Select someone in the clearing to see their story.</p></div>
+        <div class="inspector-tabs" role="tablist" aria-label="Villager details"><button role="tab" aria-selected="true" data-tab="story">Their life</button><button role="tab" aria-selected="false" data-tab="mind">Inner world</button><button role="tab" aria-selected="false" data-tab="ties">Connections</button></div>
+        <div id="person-details" class="person-details" role="tabpanel"></div>
+        <div class="inspector-footer"><button class="outline-button" id="follow-button">◎ Follow their day</button><button class="icon-button" id="focus-button" aria-label="Center map on selected villager" title="Center on villager">⌖</button></div>
+      </aside>
+
+      <section class="chronicle panel" aria-label="Village chronicle">
+        <div class="section-heading"><div><span class="eyebrow">THE THINGS THAT HAPPEN</span><h2>Village chronicle<span class="small-dot">●</span></h2></div><select id="event-filter" aria-label="Filter chronicle"><option value="all">Everything</option><option value="selected">This villager</option><option value="social">Connections</option><option value="world">World events</option></select></div>
+        <div id="chronicle-list" class="chronicle-list"><div class="empty-state">The village is still waking up.<br><span>Every story starts somewhere.</span></div></div>
+        <div class="chronicle-footer"><span id="event-count">0 moments recorded</span><span>THE WORLD REMEMBERS</span></div>
+      </section>
+
+      <section class="oracle panel" aria-label="World oracle">
+        <div class="section-heading"><div><span class="eyebrow">A WHISPER BECOMES A WORLD</span><h2><span class="oracle-star">✳</span> The oracle</h2></div><span class="oracle-tag">YOU</span></div>
+        <p class="oracle-intro">Write your own scenario. Change it as the story unfolds, or end it when its time is over.</p><div class="oracle-model-status" id="oracle-model-status">Connecting to village intelligence…</div>
+        <form id="oracle-form"><div class="oracle-edit-banner" id="oracle-edit-banner" hidden><span>Editing an active scenario</span><button type="button" id="oracle-cancel-edit">Cancel edit</button></div><label class="oracle-input-label" for="oracle-input" id="oracle-input-label">Your scenario</label><textarea id="oracle-input" rows="3" maxlength="1200" placeholder="Describe anything the village should experience. A new arrival, an impossible discovery, a threat from beyond the river…" required></textarea><div class="oracle-presets"><button type="button" data-preset="doom">AI unease</button><button type="button" data-preset="monster">A giant approaches</button><button type="button" data-preset="harvest">Bountiful harvest</button><button type="button" data-preset="festival">A little celebration</button></div><div class="oracle-settings"><label>Intensity <input type="range" id="oracle-intensity" min="0" max="100" value="60"><output id="intensity-value">60%</output></label><label class="duration-label"><span class="sr-only">Effect duration</span><select id="oracle-duration"><option value="6">6 hours</option><option value="24" selected>1 day</option><option value="72">3 days</option><option value="168">1 week</option></select></label><button class="oracle-submit" type="submit">Let it be <span>↗</span></button></div></form>
+        <div id="oracle-active" class="oracle-active" aria-label="Active world scenarios"><div class="scenario-section-heading"><span>ACTIVE SCENARIOS</span><span id="scenario-count">—</span></div><p class="scenario-explanation">End a scenario to remove its influence. Villagers keep their memories of what happened.</p><div id="scenario-list"><p class="scenario-empty">Loading the village’s active scenarios…</p></div></div>
+      </section>
+    </div>
+
+    <footer class="app-footer"><div><span class="footer-brand">hearth.</span><span>A SMALL WORLD WITH A MIND OF ITS OWN.</span></div><div class="provider-controls"><label for="mode-select">Intelligence</label><select id="mode-select"><option value="" disabled selected>Connecting…</option><option value="demo">Local simulation</option><option value="live">Jev + Luna · live</option></select><button class="text-button" id="provider-button">Model details ↗</button></div></footer>
+    <div class="provider-panel panel" id="provider-panel" hidden></div>
+  </main>
+  <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
+  <dialog id="help-dialog"><form method="dialog"><button class="dialog-close icon-button" aria-label="Close">×</button></form><span class="eyebrow">YOUR WINDOW INTO HEARTH</span><h2>A small guide to village life</h2><p>Villagers choose their own actions, build relationships, and remember what happens. Click anyone to see the life beneath the little sprite.</p><dl class="shortcuts"><div><dt><kbd>Space</kbd></dt><dd>Play or pause the world</dd></div><div><dt><kbd>.</kbd></dt><dd>Advance one turn</dd></div><div><dt><kbd>+</kbd> <kbd>−</kbd></dt><dd>Zoom in or out</dd></div><div><dt><kbd>0</kbd></dt><dd>See the whole village</dd></div><div><dt><kbd>N</kbd></dt><dd>Show or hide names</dd></div><div><dt><kbd>Esc</kbd></dt><dd>Stop following / close the roster</dd></div></dl><p class="fine-print">Local simulation uses procedural decisions and dialogue. Live intelligence uses Jev for decisions and OpenAI Luna for thoughts, speech, and oracle interpretation. Intimacy stays private and non-graphic.</p></dialog>
+</body>
+</html>

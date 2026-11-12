@@ -1,0 +1,16 @@
+# Keys: never commit
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+
+# Village saves, exports and run artifacts
+village/data/*
+!village/data/.gitkeep
+
+.DS_Store
